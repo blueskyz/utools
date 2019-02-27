@@ -36,7 +36,12 @@ g_conf_file = os.path.join(os.path.dirname(abs_path), 'utran.conf')
 class Config(dict):
     def loadCfg(self):
         try:
-            self.update(json.load(open(g_conf_file, 'r')))
+            if os.path.exists(g_conf_file):
+                self.update(json.load(open(g_conf_file, 'r')))
+            else:
+                with open(g_conf_file, 'w+') as conf:
+                    json.dump(self, conf)
+                    write(conf, json.dumps({}))
         except Exception as e:
             print(e)
             self._conf = None
@@ -154,6 +159,8 @@ class RemoteServersList(QTreeWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._updateUIStatus)
         self._timer.start(10000)
+        self._remoteServDirs = []
+        self._remoteServFiles = []
 
     def _statusLabel(self, status):
         if status == 'good':
@@ -240,29 +247,55 @@ class RemoteServersList(QTreeWidget):
         nameLabel = self.itemWidget(item, 0).text()
         print('clicked: {}'.format(nameLabel))
         if nameLabel in self._datas:
-            values = self._datas[nameLabel]
-            remoteLabel = '{}:{}'.format(values[0], values[5])
-            self._parent.setRemoteLabel(remoteLabel)
-            # 获取远端服务器目录文件列表
-            servConn = Connection(host=serv[0],
-                                  port=serv[1],
-                                  user=serv[2],
-                                  connect_kwargs={'password': serv[3]},
-                                  connect_timeout=5)
-            def task():
-                result = servConn.run('ls {}'.format(serv[4]), hide=True)
+            serv = self._datas[nameLabel]
+
+            def getServFileList(curDir):
+                remoteLabel = '{}:{}'.format(serv[0], curDir)
+                self._parent.setRemoteLabel(remoteLabel)
+
+                # 获取远端服务器目录文件列表
+                def getList(command):
+                    try:
+                        servConn = Connection(host=serv[1],
+                                              port=serv[2],
+                                              user=serv[3],
+                                              connect_kwargs={'password': serv[4]},
+                                              connect_timeout=10)
+                        result = servConn.run(command, hide=True)
+                    except Exception as error:
+                        print(error)
+
+                    if 'result' in locals() and result.ok:
+                            return result.stdout.strip().split('\n')
+                    else:
+                        return []
+
+
+                self._remoteServDirs = getList('cd {} && find . -type d -maxdepth 1'.format(curDir))
+                self._remoteServFiles = getList('cd {} && find . -type f -maxdepth 1'.format(curDir))
+                self._remoteServDirs = ['..' if len(i) == 1 else i[2:] for i in self._remoteServDirs] 
+                self._remoteServFiles = ['..' if len(i) == 1 else i[2:] for i in self._remoteServFiles]
+
+                if not self._remoteServDirs:
+                    self._remoteServDirs = ['..']
+                if not self._remoteServFiles:
+                    self._remoteServFiles = ['..']
+                return self._remoteServDirs, self._remoteServFiles
+
+            self._parent.setRemoteList(serv[5], getServFileList)
+
 
     def doubleClicked(self, item):
         nameLabel = self.itemWidget(item, 0).text()
         if nameLabel in self._datas:
-            values = self._datas[nameLabel]
+            serv = self._datas[nameLabel]
             hostDialog = HostDialog(self,
-                                    name=values[0],
-                                    host=values[1],
-                                    port=values[2],
-                                    user=values[3],
-                                    passwd=values[4],
-                                    path=values[5])
+                                    name=serv[0],
+                                    host=serv[1],
+                                    port=serv[2],
+                                    user=serv[3],
+                                    passwd=serv[4],
+                                    path=serv[5])
             serv = hostDialog.getServ()
             if serv:
                 self.addHost(serv)
@@ -382,6 +415,50 @@ class HostDialog(QDialog):
         return self._serv
 
 
+class RemoteServFileList(QTreeWidget):
+    def __init__(self):
+        super().__init__()
+        self._curDir = None
+        self.setColumnCount(2)
+        self.setHeaderLabels(['', '名称'])
+        self.setColumnWidth(1, 200)
+        self.itemDoubleClicked.connect(self.doubleClicked)
+
+    def doubleClicked(self, item):
+        selected = self.itemWidget(item, 0).text()
+        if selected in self._dirs and self._curDir:
+            if selected == '..':
+                self._curDir = self._curDir[:self._curDir.rfind('/')]
+            else:
+                self._curDir = '{}/{}'.format(self._curDir, selected)
+
+            print(selected, self._curDir)
+            self.setRemoteList(self._curDir)
+
+    def setRemoteList(self, curDir, getServFileList=None):
+        self._curDir = curDir
+        if getServFileList:
+            self._getServFileList = getServFileList
+
+        self._dirs, self._files = self._getServFileList(curDir)
+        self.clear()
+        icon = self.style().standardIcon(QStyle.SP_DirIcon)
+        for curDir in self._dirs:
+            treeWidgetItem = QTreeWidgetItem()
+            treeWidgetItem.setIcon(0, icon)
+            self.addTopLevelItem(treeWidgetItem)
+            self.setItemWidget(treeWidgetItem, 0, QLabel(curDir))
+
+        iconFile = self.style().standardIcon(QStyle.SP_FileIcon)
+        for curFile in self._files:
+            treeWidgetItem = QTreeWidgetItem()
+            treeWidgetItem.setIcon(0, iconFile)
+            self.addTopLevelItem(treeWidgetItem)
+            self.setItemWidget(treeWidgetItem, 0, QLabel(curFile))
+
+        self.expandAll()
+
+
 class UTranMain(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -427,7 +504,7 @@ class UTranMain(QMainWindow):
         # 目录内容展示
         self._localTreeLayout = LocalDirTree()
         self._localDirLabel.setText(self._localTreeLayout.curdir)
-        self._remoteListLayout = QListView()
+        self._remoteListLayout = RemoteServFileList()
         leftLayout.addWidget(self._localDirLabel)
         leftLayout.addWidget(self._localTreeLayout)
         self._localDirLabel.setMaximumHeight(40)
@@ -565,6 +642,9 @@ class UTranMain(QMainWindow):
 
     def setRemoteLabel(self, label):
         self._remoteDirLabel.setText(label)
+
+    def setRemoteList(self, curDir, getServFileList):
+        self._remoteListLayout.setRemoteList(curDir, getServFileList)
 
 
 if __name__ == '__main__':
