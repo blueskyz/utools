@@ -35,6 +35,7 @@ g_conf_file = os.path.join(os.path.dirname(abs_path), 'utran.conf')
 
 class Config(dict):
     def loadCfg(self):
+        print('load config')
         try:
             if os.path.exists(g_conf_file):
                 self.update(json.load(open(g_conf_file, 'r')))
@@ -63,6 +64,7 @@ class LocalDirTree(QTreeView):
             self.updateDir('')
 
         self.setColumnWidth(0, 200)
+        print('create local directory')
 
     def updateDir(self, directory):
         # 保存位置
@@ -117,25 +119,31 @@ class  CheckServStatusThread(threading.Thread):
                     servsTmp = copy.copy(self._servs)
 
                 for serv in servsTmp.values():
-                    key = serv[0]
-                    serv = serv[1:]
-                    servConn = Connection(host=serv[0],
-                                          port=serv[1],
-                                          user=serv[2],
-                                          connect_kwargs={'password': serv[3]},
+                    servConn = Connection(host=serv[1],
+                                          port=serv[2],
+                                          user=serv[3],
+                                          connect_kwargs={'password': serv[4]},
                                           connect_timeout=5)
                     def task():
-                        result = servConn.run('ls {}'.format(serv[4]), hide=True)
+                        result = servConn.run('ls {} | head -3'.format(serv[5]), hide=True)
                         # print(result)
+
                         if result.ok:
-                            servsTmp[key][6] = 'good'
+                            serv[6] = 'good'
+                            serv[7] = '无'
+                        else:
+                            serv[6] = 'bad'
+                            serv[7] = result.stdout.strip()[:256]
                     try:
                         task()
+                        print(serv)
                     except (Exception, SystemExit) as e:
                         print(e)
-                        servsTmp[key][6] = 'bad'
+                        serv[6] = 'bad'
+                        serv[7] = str(e)
 
                 with self._mutex:
+                    print(servsTmp)
                     self._servs.update(servsTmp)
 
 
@@ -146,8 +154,8 @@ class RemoteServersList(QTreeWidget):
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.itemClicked.connect(self.clicked)
         self.itemDoubleClicked.connect(self.doubleClicked)
-        self.setColumnCount(5)
-        self.setHeaderLabels(['名称', '主机', '端口', '路径', '状态'])
+        self.setColumnCount(6)
+        self.setHeaderLabels(['名称', '主机', '端口', '路径', '状态', '问题描述'])
         self.setColumnWidth(1, 200)
         self._datas = ODict(g_conf.get('remoteServs', {}))
         self._mutex = threading.Lock()
@@ -161,8 +169,9 @@ class RemoteServersList(QTreeWidget):
         self._timer.start(10000)
         self._remoteServDirs = []
         self._remoteServFiles = []
+        print('create remote servers list')
 
-    def _statusLabel(self, status):
+    def _statusLabel(self, status, question='无'):
         if status == 'good':
             color = 'green'
             text = u'可用'
@@ -172,12 +181,12 @@ class RemoteServersList(QTreeWidget):
         else:
             color = 'red'
             text = u'不可用'
-        return QLabel('<font color="{}">{}</font>'.format(color, text))
+        return (QLabel('<font color="{}">{}</font>'.format(color, text)),
+                QLabel('<font color="{}">{}</font>'.format(color, question)))
 
     def _updateUI(self):
         # self._checkStatus()
-        statusLabel = lambda color, text: QLabel('<font color="{}">{}</font>'.format(color, text))
-
+        # print('datas {}'.format(self._datas))
         with self._mutex:
             self.clear()
             for item in self._datas.values():
@@ -187,21 +196,21 @@ class RemoteServersList(QTreeWidget):
                 self.setItemWidget(treeWidgetItem, 1, QLabel(item[1]))
                 self.setItemWidget(treeWidgetItem, 2, QLabel(item[2]))
                 self.setItemWidget(treeWidgetItem, 3, QLabel(item[5]))
-                self.setItemWidget(treeWidgetItem, 4, self._statusLabel(item[6]))
+                status, question = self._statusLabel(item[6], item[6])
+                self.setItemWidget(treeWidgetItem, 4, status)
+                self.setItemWidget(treeWidgetItem, 5, question)
 
     def _updateUIStatus(self):
-        statusLabel = lambda color, text: QLabel('<font color="{}">{}</font>'.format(color, text))
-
         with self._mutex:
-            itemStatus = {data[0]: data[6] for data in self._datas.values()}
-            print(itemStatus)
+            itemStatus = {data[0]: (data[6], data[7]) for data in self._datas.values()}
+            # print(itemStatus)
             for i in range(self.topLevelItemCount()):
                 treeWidgetItem = self.topLevelItem(i)
                 name = self.itemWidget(treeWidgetItem, 0).text()
+                status, question = self._statusLabel(itemStatus[name][0], itemStatus[name][1])
                 if name in itemStatus:
-                    self.setItemWidget(treeWidgetItem,
-                                       4,
-                                       self._statusLabel(itemStatus[name]))
+                    self.setItemWidget(treeWidgetItem, 4, status)
+                    self.setItemWidget(treeWidgetItem, 5, question)
 
     def getRows(self):
         rows = []
@@ -219,9 +228,12 @@ class RemoteServersList(QTreeWidget):
         '''
         with self._mutex:
             check = [True for i in serv if i]
+            # print('update {}'.format(serv))
             if check.count(True) == 6:
                 serv = list(serv)
                 serv.append('check')
+                serv.append('无')
+                print(serv)
                 self._datas[serv[0]] = serv
 
                 # 自动存储配置
@@ -230,8 +242,8 @@ class RemoteServersList(QTreeWidget):
             else:
                 print('missing information!')
 
-        if check.count(True) == 6:
-            self._updateUI()
+        self._updateUI()
+
 
     def removeHost(self):
         with self._mutex:
@@ -245,13 +257,17 @@ class RemoteServersList(QTreeWidget):
 
     def clicked(self, item):
         nameLabel = self.itemWidget(item, 0).text()
-        print('clicked: {}'.format(nameLabel))
         if nameLabel in self._datas:
             serv = self._datas[nameLabel]
+            if serv[6] != 'good':
+                self._parent.clearRemoteList()
+                return
 
             def getServFileList(curDir):
                 remoteLabel = '{}:{}'.format(serv[0], curDir)
                 self._parent.setRemoteLabel(remoteLabel)
+                serv[5] = curDir
+                self.setItemWidget(item, 3, QLabel(curDir))
 
                 # 获取远端服务器目录文件列表
                 def getList(command):
@@ -289,6 +305,7 @@ class RemoteServersList(QTreeWidget):
         nameLabel = self.itemWidget(item, 0).text()
         if nameLabel in self._datas:
             serv = self._datas[nameLabel]
+            # print(serv)
             hostDialog = HostDialog(self,
                                     name=serv[0],
                                     host=serv[1],
@@ -379,12 +396,12 @@ class HostDialog(QDialog):
         if len(path) > 2 and path[-1] in ['/', '\\']:
             path = path[:-1]
 
-        self._serv = self._servNameLineEdit.text(), \
-                self._hostLineEdit.text(), \
-                self._portLineEdit.text(), \
-                self._userLineEdit.text(), \
-                self._passwdLineEdit.text(), \
-                path
+        self._serv = (self._servNameLineEdit.text(),
+                      self._hostLineEdit.text(),
+                      self._portLineEdit.text(),
+                      self._userLineEdit.text(),
+                      self._passwdLineEdit.text(),
+                      path)
 
         check = [True for i in self._serv if i]
         if check.count(True) == 6:
@@ -430,7 +447,13 @@ class RemoteServFileList(QTreeWidget):
             if selected == '..':
                 self._curDir = self._curDir[:self._curDir.rfind('/')]
             else:
-                self._curDir = '{}/{}'.format(self._curDir, selected)
+                if self._curDir == '/':
+                    self._curDir = '/{}'.format(selected)
+                else:
+                    self._curDir = '{}/{}'.format(self._curDir, selected)
+
+            if self._curDir == '':
+                self._curDir = '/'
 
             print(selected, self._curDir)
             self.setRemoteList(self._curDir)
@@ -645,6 +668,9 @@ class UTranMain(QMainWindow):
 
     def setRemoteList(self, curDir, getServFileList):
         self._remoteListLayout.setRemoteList(curDir, getServFileList)
+
+    def clearRemoteList(self):
+        self._remoteListLayout.clear()
 
 
 if __name__ == '__main__':
